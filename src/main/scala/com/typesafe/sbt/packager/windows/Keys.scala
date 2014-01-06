@@ -8,6 +8,7 @@ trait WindowsKeys {
 
   val wixProductId = SettingKey[String]("wix-product-id", "The uuid of the windows package.")
   val wixProductUpgradeId = SettingKey[String]("wix-product-upgrade-id", "The uuid associated with upgrades for this package.")
+  val wixProductComments = SettingKey[String]("wix-product-comments", "The wix comments for this package.")
   val wixPackageInfo = SettingKey[WindowsProductInfo]("wix-package-info", "The configuration for this package.")
   val wixProductLicense = TaskKey[Option[File]]("wix-product-license", "The RTF file to display with licensing.")
   val wixFeatures = TaskKey[Seq[WindowsFeature]]("wix-features", "Configuration of the windows installable features for this package.")

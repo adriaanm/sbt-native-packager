@@ -19,6 +19,7 @@ trait WindowsPlugin extends Plugin {
                          "-cultures:en-us"),
       wixProductId := WixHelper.makeGUID,
       wixProductUpgradeId := WixHelper.makeGUID,
+      wixProductComments := "",
       maintainer in Windows <<= maintainer,
       packageSummary in Windows <<= packageSummary,
       packageDescription in Windows <<= packageDescription,
@@ -30,11 +31,12 @@ trait WindowsPlugin extends Plugin {
       },
       wixPackageInfo <<= (
           wixProductId, 
-          wixProductUpgradeId, 
+          wixProductUpgradeId,
+          wixProductComments,
           version in Windows, 
           maintainer in Windows,
           packageSummary in Windows,
-          packageDescription in Windows) apply { (id, uid, version, mtr, title, desc) =>
+          packageDescription in Windows) apply { (id, uid, comments, version, mtr, title, desc) =>
         WindowsProductInfo(
           id = id,
           title = title,
@@ -42,7 +44,7 @@ trait WindowsPlugin extends Plugin {
           maintainer = mtr,
           description = desc,
           upgradeId = uid,
-          comments = "TODO - we need comments."  // TODO - allow comments
+          comments = comments
         )
       },
       wixFeatures := Seq.empty,
