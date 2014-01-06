@@ -20,7 +20,13 @@ case class WindowsProductInfo(
   compressed: Boolean = true
 )
 
-sealed trait FeatureComponent
+// We need component helpers...
+case class ComponentInfo(id: String, xml: scala.xml.Node)
+
+trait FeatureComponent {
+  def componentInfo(productName: String, product: WindowsProductInfo): ComponentInfo
+}
+
 /** Define a new feature, that will be selectable in the default MSI. */
 case class WindowsFeature(
     id: String,
@@ -29,26 +35,132 @@ case class WindowsFeature(
     absent: String="allow",
     level: String="1",
     display: String="collapse",
-    components: Seq[FeatureComponent] = Seq.empty) extends FeatureComponent {}
+    components: Seq[FeatureComponent] = Seq.empty) extends FeatureComponent {
+  def componentInfo(productName: String, product: WindowsProductInfo) = sys.error("Nested windows features currently unsupported!")
+}
+
 /** Adds a file into a given windows feature. */
 case class ComponentFile(
     source: String,
     editable: Boolean = false
-) extends FeatureComponent
+) extends FeatureComponent {
+  def componentInfo(productName: String, product: WindowsProductInfo): ComponentInfo = { import WixHelper._
+    val uname  = source.replaceAll("\\\\", "/")
+    val dir    = parentDir(uname).replaceAll("//", "/").stripSuffix("/").stripSuffix("/")
+    val dirRef = if(dir.isEmpty) "INSTALLDIR" else cleanStringForId(dir)
+    val id     = cleanStringForId(uname).takeRight(67) // Room for "fl_"
+
+    ComponentInfo(id,
+      <DirectoryRef Id={dirRef}>
+        <Component Id={id} Guid={makeGUID}>
+          <File Id={"fl_" + id} Name={cleanFileName(simpleName(uname))} DiskId='1' Source={cleanFileName(uname)}>
+            {
+              if(editable) {
+                <xml:group>
+                  <util:PermissionEx User="Administrators" GenericAll="yes" />
+                  <util:PermissionEx User="Users" GenericAll="yes" />
+                </xml:group>
+              } else Seq.empty
+            }
+          </File>
+        </Component>
+      </DirectoryRef>)
+  }
+}
+
+
 /** Will add the directory to the windows path.  NOTE: Only one of these
  * per MSI.
  */
-case class AddDirectoryToPath(dir: String = "") extends FeatureComponent
+case class AddDirectoryToPath(dir: String = "") extends FeatureComponent {
+  def componentInfo(productName: String, product: WindowsProductInfo): ComponentInfo = { import WixHelper._
+    val dirRef = if(dir.isEmpty) "INSTALLDIR" else cleanStringForId(dir)
+    val homeEnvVar = archetypes.JavaAppBatScript.makeEnvFriendlyName(productName) +"_HOME"
+    val pathAddition =
+      if(dir.isEmpty) "%"+homeEnvVar+"%"
+      else "[INSTALLDIR]\\"+dir.replaceAll("\\/", "\\\\")
+    val id = cleanStringForId(dir).takeRight(65) + "PathC"
+    val xml =
+      <DirectoryRef Id={dirRef}>
+        <Component Id={id} Guid={makeGUID}>
+          <CreateFolder/>
+          <Environment Id={homeEnvVar} Name={homeEnvVar} Value="[INSTALLDIR]" Permanent="no" Action="set" System="yes" />
+          <Environment Id="PATH" Name="PATH" Value={pathAddition} Permanent="no" Part="last" Action="set" System="yes" />
+        </Component>
+      </DirectoryRef>
+
+    ComponentInfo(id, xml)
+  }
+}
+
 case class AddShortCuts(
    target: Seq[String],
-   workingDir: String="INSTALLDIR"
-) extends FeatureComponent
+   workingDir: String = "INSTALLDIR"
+) extends FeatureComponent {
+  def componentInfo(productName: String, product: WindowsProductInfo): ComponentInfo = { import WixHelper._
+    val id = cleanStringForId("shortcut_" + makeGUID).takeRight(67)  // Room for "_SC"
+    val xml =
+      <DirectoryRef Id="ApplicationProgramsFolder">
+        <Component Id={id} Guid={makeGUID}>
+            {
+              for(tgt <- target) yield {
+                val name = simpleName(tgt)
+                val desc = "Edit configuration file: " + name
+                val cleanName = name.replaceAll("[\\.-\\\\//]+","_")
+                <Shortcut Id={id+"_SC"}
+                      Name={cleanName}
+                      Description={desc}
+                      Target={"[INSTALLDIR]\\" + tgt.replaceAll("\\/", "\\\\")}
+                      WorkingDirectory={workingDir}/>
+              }
+            }
+          <RemoveFolder Id="ApplicationProgramsFolderRemove" Directory="ApplicationProgramsFolder" On="uninstall"/>
+          <RegistryValue Root="HKCU" Key={"Software\\"+product.maintainer+"\\"+name} Name="installed" Type="integer" Value="1" KeyPath="yes"/>
+        </Component>
+      </DirectoryRef>
+    ComponentInfo(id, xml)
+  }
+}
+
+case class SimpleShortcut(name: String, description: String, target: String) {
+  def toXml(id: String) = {
+    val cleanName = name.replaceAll("[\\.-\\\\//]+","_")
+    <Shortcut Id={id} Name={cleanName} Description={description} Target={target.replaceAll("/", """\\""")} />
+  }
+}
+
+/**
+ * shortcutsWithId should be a function like:
+ * `id => Seq(<Shortcut Id={id} Name={name} Description={description} Target={target.replaceAll("/", """\\""")} WorkingDirectory={workingdir}/>, ...)`
+ **/
+case class AddShortcutsXml(shortcutsWithId: String => scala.xml.NodeSeq) extends FeatureComponent {
+  def componentInfo(productName: String, product: WindowsProductInfo): ComponentInfo = { import WixHelper._
+    val id = cleanStringForId("shortcut_" + makeGUID).takeRight(67)  // Room for "_SC"
+    val xml =
+      <DirectoryRef Id="ApplicationProgramsFolder">
+        <Component Id={id} Guid={makeGUID}>
+          {shortcutsWithId(id+"_SC")}
+          <RemoveFolder Id="ApplicationProgramsFolderRemove" Directory="ApplicationProgramsFolder" On="uninstall"/>
+          <RegistryValue Root="HKCU" Key={"Software\\"+product.maintainer+"\\"+name} Name="installed" Type="integer" Value="1" KeyPath="yes"/>
+        </Component>
+      </DirectoryRef>
+    ComponentInfo(id, xml)
+  }
+}
 
 
 // TODO - Shortcut as a component element.
 
 /** Helper functions to deal with Wix/CAB craziness. */
 object WixHelper {
+  def parentDir(filename: String) = { filename take (filename lastIndexOf '/') }
+  def simpleName(filename: String) = {
+    val lastSlash =
+      if(filename contains '/') filename lastIndexOf '/'
+      else filename lastIndexOf '\\'
+    filename drop (lastSlash + 1)
+  }
+
   /** Generates a windows friendly GUID for use in random locations in the build. */
   def makeGUID: String = java.util.UUID.randomUUID.toString
 
@@ -65,13 +177,6 @@ object WixHelper {
       } yield allParentDirs(file(name))
     val filenames = filenamesPrep.flatten.map(_.toString.replaceAll("\\\\","/")).filter(_ != "")
     // Now for directories...
-    def parentDir(filename: String) = { filename take (filename lastIndexOf '/') }
-    def simpleName(filename: String) = {
-      val lastSlash = 
-        if(filename contains '/') filename lastIndexOf '/'
-        else filename lastIndexOf '\\'
-      filename drop (lastSlash + 1)
-    }
     val dirs = (filenames map parentDir).distinct;
     // Now we need our directory tree xml?
     val dirToChildren = dirs groupBy parentDir;
@@ -84,87 +189,12 @@ object WixHelper {
       </Directory>
     } else <!-- -->
 
-    // We need component helpers...
-    case class ComponentInfo(id: String, xml: scala.xml.Node)
-    def makeComponentInfo(c: FeatureComponent): ComponentInfo = c match {
-      case w: WindowsFeature => sys.error("Nested windows features currently unsupported!")
-      case AddDirectoryToPath(dir) =>
-        val dirRef = if(dir.isEmpty) "INSTALLDIR" else cleanStringForId(dir)
-        val homeEnvVar = archetypes.JavaAppBatScript.makeEnvFriendlyName(name) +"_HOME"
-        val pathAddition = 
-          if(dir.isEmpty) "%"+homeEnvVar+"%"
-          else "[INSTALLDIR]\\"+dir.replaceAll("\\/", "\\\\")
-        val id = cleanStringForId(dir).takeRight(65) + "PathC"
-        val guid = makeGUID
-        val xml =
-          <DirectoryRef Id={dirRef}>
-            <Component Id={id} Guid={guid}>
-              <CreateFolder/>
-              <Environment Id={homeEnvVar} Name={homeEnvVar} Value="[INSTALLDIR]" Permanent="no" Action="set" System="yes" />
-              <Environment Id="PATH" Name="PATH" Value={pathAddition} Permanent="no" Part="last" Action="set" System="yes" />
-            </Component>
-          </DirectoryRef>
-        ComponentInfo(id, xml)
-      case ComponentFile(name, editable) =>
-        val uname = name.replaceAll("\\\\", "/")
-        val dir = parentDir(uname).replaceAll("//", "/").stripSuffix("/").stripSuffix("/")
-        val dirRef = if(dir.isEmpty) "INSTALLDIR" else cleanStringForId(dir)
-            val fname = simpleName(uname)
-            val id = cleanStringForId(uname).takeRight(67)  // Room for "fl_"
-            val xml = 
-            <DirectoryRef Id={dirRef}>
-              <Component Id={id} Guid={makeGUID}>
-                <File Id={"fl_" + id} Name={cleanFileName(fname)} DiskId='1' Source={cleanFileName(uname)}>
-                  {
-                    if(editable) {
-                      <xml:group>
-                        <util:PermissionEx User="Administrators" GenericAll="yes" />
-                        <util:PermissionEx User="Users" GenericAll="yes" />
-                      </xml:group>
-                    } else Seq.empty
-                  }
-                </File>
-              </Component>
-            </DirectoryRef>
-            ComponentInfo(id, xml)
-      // TODO - To have shortcuts, you MUST put something in the registry.  Here,
-      // We should have shortcuts actually provide us with what they want in the registry,
-      // rather than forcing it to be something.
-      // Also, we need some mechanism to ensure the start menu folder is removed in the event
-      // that we remove all menu items.
-      case AddShortCuts(targets, workingDir) =>
-        val id = cleanStringForId("shortcut_" + makeGUID).takeRight(67)  // Room for "_SC"
-        val xml =
-          <DirectoryRef Id="ApplicationProgramsFolder">
-            <Component Id={id} Guid={makeGUID}>
-                {
-                  for(target <- targets) yield {
-                    val name = simpleName(target)
-                    val desc = "Edit configuration file: " + name
-                    val cleanName = name.replaceAll("[\\.-\\\\//]+","_")
-                    <Shortcut Id={id+"_SC"}
-                          Name={cleanName}
-                          Description={desc}
-                          Target={"[INSTALLDIR]\\" + target.replaceAll("\\/", "\\\\")}
-                          WorkingDirectory="INSTALLDIR"/>
-                  }
-                }
-              <RemoveFolder Id="ApplicationProgramsFolderRemove" Directory="ApplicationProgramsFolder" On="uninstall"/>
-              <RegistryValue Root="HKCU" Key={"Software\\"+product.maintainer+"\\"+name} Name="installed" Type="integer" Value="1" KeyPath="yes"/>
-            </Component>
-          </DirectoryRef>
-        ComponentInfo(id, xml)
-    }
-    
     val componentMap =
       (for(f <- features) yield {
         // TODO - we need to support more than "Component File".
-        val componentInfos =
-          f.components map makeComponentInfo
-        f.id -> componentInfos
+        f.id -> f.components.map(_.componentInfo(name, product))
       }).toMap
-      
-      
+
     <xml:group>
       <!-- Define the directories we use -->
       <Directory Id='TARGETDIR' Name='SourceDir'>
